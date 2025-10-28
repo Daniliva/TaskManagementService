@@ -21,7 +21,7 @@ public class TasksController : ControllerBase
     }
 
     [HttpPost]
-    public async Task<ActionResult<Task>> Create([FromBody] CreateTaskDto dto)
+    public async Task<ActionResult<Models.Task>> Create([FromBody] CreateTaskDto dto)
     {
         var validationResult = await _createValidator.ValidateAsync(dto);
         if (!validationResult.IsValid)
@@ -29,20 +29,20 @@ public class TasksController : ControllerBase
             return BadRequest(validationResult.Errors.Select(e => e.ErrorMessage));
         }
 
-        var task = new Task { Title = dto.Title, Description = dto.Description };
+        var task = new Models.Task { Title = dto.Title, Description = dto.Description };
         var created = await _repository.CreateAsync(task);
         return CreatedAtAction(nameof(GetById), new { id = created.Id }, created);
     }
 
     [HttpGet]
-    public async Task<ActionResult<IEnumerable<Task>>> GetAll()
+    public async Task<ActionResult<IEnumerable<Models.Task>>> GetAll()
     {
         var tasks = await _repository.GetAllAsync();
         return Ok(tasks);
     }
 
     [HttpGet("{id}")]
-    public async Task<ActionResult<Task>> GetById(int id)
+    public async Task<ActionResult<Models.Task>> GetById(int id)
     {
         var task = await _repository.GetByIdAsync(id);
         return task is null ? NotFound() : Ok(task);
