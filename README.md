@@ -1,9 +1,30 @@
 # Task Management Service
 
-A lightweight REST API for managing tasks with strict status-transition rules and input validation.
+Lightweight REST API for task management with status rules and validation.
 
 ## Features
-- **Create** a new task (default status: `Backlog`)
-- **List** all tasks
-- **Get** a task by ID
-- **Update** task status with allowed transitions only:
+- Create task (default: `Backlog`)
+- List all tasks
+- Get task by ID
+- Update status: `Backlog → InWork → Testing → Done` only
+
+## Tech Stack
+- C# / .NET 6+
+- ASP.NET Core
+- In-Memory storage
+- FluentValidation
+- xUnit
+
+## How to Run
+1. `dotnet restore`
+2. `dotnet run`
+
+Swagger: `https://localhost:****/swagger`
+
+## Example (cURL)
+```bash
+curl -X POST "https://localhost:****/api/tasks" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Task","description":"Desc"}'
+## Tests
+dotnet test
