@@ -1,4 +1,4 @@
-﻿using FluentValidation;
+using FluentValidation;
 using TaskManagementService.DTOs;
 
 namespace TaskManagementService.Validators;

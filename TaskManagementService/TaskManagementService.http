@@ -1,6 +1,21 @@
 @TaskManagementService_HostAddress = http://localhost:5290
 
-GET {{TaskManagementService_HostAddress}}/weatherforecast/
-Accept: application/json
+POST {{TaskManagementService_HostAddress}}/api/tasks
+Content-Type: application/json
+
+{ "title": "Write docs", "description": "README and plan" }
 
 ###
+
+GET {{TaskManagementService_HostAddress}}/api/tasks?status=Backlog&search=docs&page=1&pageSize=20
+
+###
+
+PATCH {{TaskManagementService_HostAddress}}/api/tasks/1/status
+Content-Type: application/json
+
+{ "status": "InWork" }
+
+###
+
+GET {{TaskManagementService_HostAddress}}/api/tasks/1/history

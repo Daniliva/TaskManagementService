@@ -1,30 +1,52 @@
 # Task Management Service
 
-Lightweight REST API for task management with status rules and validation.
+Лёгкий REST API задач на ASP.NET Core: создание, поиск и фильтры, правка, удаление, смена статуса по цепочке и история переходов.
 
-## Features
-- Create task (default: `Backlog`)
-- List all tasks
-- Get task by ID
-- Update status: `Backlog → InWork → Testing → Done` only
+## Возможности
 
-## Tech Stack
-- C# / .NET 6+
-- ASP.NET Core
-- In-Memory storage
-- FluentValidation
-- xUnit
+| Метод и путь | Что делает |
+|---|---|
+| `POST /api/tasks` | создать задачу (статус всегда `Backlog`) → 201 + `Location` |
+| `GET /api/tasks?status=&search=&page=&pageSize=` | список с фильтром по статусу, поиском по названию и описанию и пагинацией (`pageSize` 1–100, по умолчанию 20) |
+| `GET /api/tasks/{id}` | задача или 404 |
+| `PUT /api/tasks/{id}` | заменить название и описание |
+| `DELETE /api/tasks/{id}` | удалить → 204 |
+| `PATCH /api/tasks/{id}/status` | сменить статус: только `Backlog → InWork → Testing → Done`; запрещённый переход → 409 со списком допустимых |
+| `GET /api/tasks/{id}/history` | история переходов, от старых к новым |
+| `GET /health` | проверка живости |
 
-## How to Run
-1. `dotnet restore`
-2. `dotnet run`
+Статусы передаются строками (`"InWork"`, регистр не важен). Ошибки — `application/problem+json`: 400 (проверка ввода, список ошибок по полям),
+404, 409, 500 (без подробностей).
 
-Swagger: `https://localhost:****/swagger`
+## Технологии
 
-## Example (cURL)
+C# / .NET 9, ASP.NET Core, FluentValidation, Swagger (Swashbuckle), хранилище в памяти (потокобезопасное), xUnit.
+
+## Запуск
+
 ```bash
-curl -X POST "https://localhost:****/api/tasks" \
+dotnet restore
+dotnet run --project TaskManagementService
+```
+
+Swagger (в Development): `https://localhost:<порт>/swagger`
+
+## Пример
+
+```bash
+curl -X POST "https://localhost:<порт>/api/tasks" \
   -H "Content-Type: application/json" \
   -d '{"title":"Task","description":"Desc"}'
-## Tests
+
+curl -X PATCH "https://localhost:<порт>/api/tasks/1/status" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"InWork"}'
+```
+
+## Тесты
+
+```bash
 dotnet test
+```
+
+Данные хранятся в памяти и пропадают при перезапуске (постоянное хранение — в плане, см. `docs/PLAN.md`).

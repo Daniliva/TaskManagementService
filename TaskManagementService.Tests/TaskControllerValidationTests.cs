@@ -1,7 +1,6 @@
 ﻿using TaskManagementService.DTOs;
 using TaskManagementService.Models;
 using TaskManagementService.Repositories;
-using TaskManagementService.Services;
 using TaskManagementService.Validators;
 using Xunit;
 using Task = System.Threading.Tasks.Task;
