@@ -1,0 +1,584 @@
+diff --git a/TaskManagementService/Controllers/TasksController.cs b/TaskManagementService/Controllers/TasksController.cs
+index 2b1a0a1..2d134af 100644
+--- a/TaskManagementService/Controllers/TasksController.cs
++++ b/TaskManagementService/Controllers/TasksController.cs
+@@ -1,4 +1,5 @@
+ using Microsoft.AspNetCore.Mvc;
++using TaskManagementService.Domain;
+ using TaskManagementService.DTOs;
+ using TaskManagementService.Filters;
+ using TaskManagementService.Models;
+@@ -27,33 +28,89 @@ public class TasksController : ControllerBase
+     [HttpPost]
+     [ProducesResponseType(typeof(Models.Task), StatusCodes.Status201Created)]
+     [ProducesResponseType(typeof(ValidationProblemDetails), StatusCodes.Status400BadRequest)]
+-    public Task<ActionResult<Models.Task>> Create([FromBody] CreateTaskDto dto) => throw new NotImplementedException("TODO");
++    public async Task<ActionResult<Models.Task>> Create([FromBody] CreateTaskDto dto)
++    {
++        var created = await this.repository.CreateAsync(new Models.Task { Title = dto.Title.Trim(), Description = (dto.Description ?? string.Empty).Trim() });
++        return this.CreatedAtAction(nameof(this.GetById), new { id = created.Id }, created);
++    }
+ 
+     /// <summary>200 with a PagedResult: filter by ?status=, ?search=, paging ?page= and ?pageSize= (see TaskQuery). Invalid query values give 400.</summary>
+     [HttpGet]
+     [ProducesResponseType(typeof(PagedResult<Models.Task>), StatusCodes.Status200OK)]
+-    public Task<ActionResult<PagedResult<Models.Task>>> GetAll([FromQuery] TaskQuery query) => throw new NotImplementedException("TODO");
++    public async Task<ActionResult<PagedResult<Models.Task>>> GetAll([FromQuery] TaskQuery query) =>
++        this.Ok(await this.repository.QueryAsync(query));
+ 
+-    /// <summary>200 with the task or 404 (problem+json, detail "Task with ID {id} not found.").</summary>
++    /// <summary>200 with the task or 404.</summary>
+     [HttpGet("{id:int}")]
+-    public Task<ActionResult<Models.Task>> GetById(int id) => throw new NotImplementedException("TODO");
++    public async Task<ActionResult<Models.Task>> GetById(int id)
++    {
++        var task = await this.repository.GetByIdAsync(id);
++        return task is null ? this.NotFoundProblem(id) : this.Ok(task);
++    }
+ 
+-    /// <summary>200 with the updated task (title and description trimmed); 404 for an unknown id; 400 for invalid input.</summary>
++    /// <summary>200 with the updated task; 404 for an unknown id; 400 for invalid input.</summary>
+     [HttpPut("{id:int}")]
+-    public Task<ActionResult<Models.Task>> Update(int id, [FromBody] UpdateTaskDto dto) => throw new NotImplementedException("TODO");
++    public async Task<ActionResult<Models.Task>> Update(int id, [FromBody] UpdateTaskDto dto)
++    {
++        try
++        {
++            return this.Ok(await this.repository.UpdateAsync(id, dto.Title.Trim(), (dto.Description ?? string.Empty).Trim()));
++        }
++        catch (KeyNotFoundException)
++        {
++            return this.NotFoundProblem(id);
++        }
++    }
+ 
+     /// <summary>204, or 404 for an unknown id.</summary>
+     [HttpDelete("{id:int}")]
+-    public Task<IActionResult> Delete(int id) => throw new NotImplementedException("TODO");
++    public async Task<IActionResult> Delete(int id) =>
++        await this.repository.DeleteAsync(id) ? this.NoContent() : this.NotFoundProblem(id);
+ 
+-    /// <summary>
+-    /// 204; 404 unknown task; 400 invalid status value; 409 (problem+json) when TaskStatusRules refuses the move:
+-    /// Detail = the refusal message, extension "allowedNext" = the statuses (as strings) that would have been accepted.
+-    /// </summary>
++    /// <summary>204; 404 unknown task; 400 invalid status value; 409 when TaskStatusRules refuses the move.</summary>
+     [HttpPatch("{id:int}/status")]
+-    public Task<IActionResult> UpdateStatus(int id, [FromBody] UpdateStatusDto dto) => throw new NotImplementedException("TODO");
++    public async Task<IActionResult> UpdateStatus(int id, [FromBody] UpdateStatusDto dto)
++    {
++        try
++        {
++            await this.repository.UpdateStatusAsync(id, dto.Status!.Value);
++            return this.NoContent();
++        }
++        catch (KeyNotFoundException)
++        {
++            return this.NotFoundProblem(id);
++        }
++        catch (InvalidOperationException ex)
++        {
++            var current = (await this.repository.GetByIdAsync(id))?.Status;
++            var problem = new ProblemDetails { Status = StatusCodes.Status409Conflict, Title = "The status change is not allowed.", Detail = ex.Message };
++            if (current is { } status)
++            {
++                problem.Extensions["allowedNext"] = TaskStatusRules.AllowedNext(status).Select(s => s.ToString()).ToArray();
++            }
++
++            return new ObjectResult(problem) { StatusCode = StatusCodes.Status409Conflict, ContentTypes = { "application/problem+json" } };
++        }
++    }
+ 
+     /// <summary>200 with the transitions (oldest first), or 404.</summary>
+     [HttpGet("{id:int}/history")]
+-    public Task<ActionResult<IReadOnlyList<TaskHistoryEntry>>> GetHistory(int id) => throw new NotImplementedException("TODO");
++    public async Task<ActionResult<IReadOnlyList<TaskHistoryEntry>>> GetHistory(int id)
++    {
++        try
++        {
++            return this.Ok(await this.repository.GetHistoryAsync(id));
++        }
++        catch (KeyNotFoundException)
++        {
++            return this.NotFoundProblem(id);
++        }
++    }
++
++    private ObjectResult NotFoundProblem(int id) =>
++        new(new ProblemDetails { Status = StatusCodes.Status404NotFound, Title = "Task not found.", Detail = $"Task with ID {id} not found." })
++        {
++            StatusCode = StatusCodes.Status404NotFound,
++            ContentTypes = { "application/problem+json" },
++        };
+ }
+diff --git a/TaskManagementService/Domain/TaskStatusRules.cs b/TaskManagementService/Domain/TaskStatusRules.cs
+index a1b998a..a0c62f4 100644
+--- a/TaskManagementService/Domain/TaskStatusRules.cs
++++ b/TaskManagementService/Domain/TaskStatusRules.cs
+@@ -12,16 +12,25 @@ public static class TaskStatusRules
+     /// <param name="current">The current status.</param>
+     /// <param name="next">The requested status.</param>
+     /// <returns>Whether the move is allowed.</returns>
+-    public static bool CanTransition(Models.TaskStatus current, Models.TaskStatus next) => throw new NotImplementedException("TODO");
++    public static bool CanTransition(Models.TaskStatus current, Models.TaskStatus next) =>
++        (current, next) switch
++        {
++            (Models.TaskStatus.Backlog, Models.TaskStatus.InWork) => true,
++            (Models.TaskStatus.InWork, Models.TaskStatus.Testing) => true,
++            (Models.TaskStatus.Testing, Models.TaskStatus.Done) => true,
++            _ => false,
++        };
+ 
+     /// <summary>The statuses reachable from <paramref name="current"/>: one element, or empty for Done and for undefined values.</summary>
+     /// <param name="current">The current status.</param>
+     /// <returns>The allowed next statuses.</returns>
+-    public static IReadOnlyList<Models.TaskStatus> AllowedNext(Models.TaskStatus current) => throw new NotImplementedException("TODO");
++    public static IReadOnlyList<Models.TaskStatus> AllowedNext(Models.TaskStatus current) =>
++        Enum.GetValues<Models.TaskStatus>().Where(next => CanTransition(current, next)).ToList();
+ 
+     /// <summary>The message used when a move is refused, e.g. "Invalid status transition from Backlog to Done.".</summary>
+     /// <param name="current">The current status.</param>
+     /// <param name="next">The requested status.</param>
+     /// <returns>The message.</returns>
+-    public static string DescribeRefusal(Models.TaskStatus current, Models.TaskStatus next) => throw new NotImplementedException("TODO");
++    public static string DescribeRefusal(Models.TaskStatus current, Models.TaskStatus next) =>
++        $"Invalid status transition from {current} to {next}.";
+ }
+diff --git a/TaskManagementService/Filters/ValidationFilter.cs b/TaskManagementService/Filters/ValidationFilter.cs
+index a482220..6f6593e 100644
+--- a/TaskManagementService/Filters/ValidationFilter.cs
++++ b/TaskManagementService/Filters/ValidationFilter.cs
+@@ -1,17 +1,66 @@
+ using FluentValidation;
+ using Microsoft.AspNetCore.Mvc;
+ using Microsoft.AspNetCore.Mvc.Filters;
++using Microsoft.AspNetCore.Mvc.ModelBinding;
+ 
+ namespace TaskManagementService.Filters;
+ 
+ /// <summary>
+-/// TODO (spec): validates every action argument that has an IValidator&lt;T&gt; registered in DI, before the action runs.
+-/// On failure the action is not executed and the answer is 400 application/problem+json (ValidationProblemDetails, Status 400,
+-/// Title "One or more validation errors occurred."): errors grouped by property name in camelCase ("title"); several problems of several
+-/// arguments are reported at once; a null argument gives the error key "" with "A request body is required.".
+-/// Use context.HttpContext.RequestAborted for the validation call.
++/// Validates every action argument that has an IValidator registered in DI, before the action runs.
++/// On failure the action is not executed and the answer is 400 application/problem+json (ValidationProblemDetails):
++/// errors grouped by property name (camelCase, e.g. "title"), a null body gives the error key "" with "A request body is required.".
+ /// </summary>
+ public sealed class ValidationFilter : IAsyncActionFilter
+ {
+-    public Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next) => throw new NotImplementedException("TODO");
++    public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
++    {
++        var errors = new Dictionary<string, List<string>>();
++        foreach (var parameter in context.ActionDescriptor.Parameters)
++        {
++            context.ActionArguments.TryGetValue(parameter.Name, out var argument);
++            var validatorType = typeof(IValidator<>).MakeGenericType(parameter.ParameterType);
++            if (context.HttpContext.RequestServices.GetService(validatorType) is not IValidator validator)
++            {
++                continue;
++            }
++
++            if (argument is null)
++            {
++                Add(errors, string.Empty, "A request body is required.");
++                continue;
++            }
++
++            var result = await validator.ValidateAsync(new ValidationContext<object>(argument), context.HttpContext.RequestAborted);
++            foreach (var failure in result.Errors)
++            {
++                Add(errors, CamelCase(failure.PropertyName), failure.ErrorMessage);
++            }
++        }
++
++        if (errors.Count > 0)
++        {
++            var problem = new ValidationProblemDetails(errors.ToDictionary(kv => kv.Key, kv => kv.Value.ToArray()))
++            {
++                Status = StatusCodes.Status400BadRequest,
++                Title = "One or more validation errors occurred.",
++            };
++            context.Result = new ObjectResult(problem) { StatusCode = StatusCodes.Status400BadRequest, ContentTypes = { "application/problem+json" } };
++            return;
++        }
++
++        _ = await next();
++    }
++
++    private static void Add(Dictionary<string, List<string>> errors, string key, string message)
++    {
++        if (!errors.TryGetValue(key, out var list))
++        {
++            list = new List<string>();
++            errors[key] = list;
++        }
++
++        list.Add(message);
++    }
++
++    private static string CamelCase(string name) => string.IsNullOrEmpty(name) ? name : char.ToLowerInvariant(name[0]) + name[1..];
+ }
+diff --git a/TaskManagementService/Program.cs b/TaskManagementService/Program.cs
+index f0fccb0..8dd9657 100644
+--- a/TaskManagementService/Program.cs
++++ b/TaskManagementService/Program.cs
+@@ -1,44 +1,71 @@
++using System.Text.Json.Serialization;
++using FluentValidation;
++using Microsoft.AspNetCore.Diagnostics;
++using Microsoft.AspNetCore.Mvc;
++using TaskManagementService.DTOs;
++using TaskManagementService.Filters;
++using TaskManagementService.Models;
+ using TaskManagementService.Repositories;
+ using TaskManagementService.Validators;
+ 
+ namespace TaskManagementService;
+ 
+-/// <summary>
+-/// TODO (spec): this is the ORIGINAL composition root. Required by the integration tests (ApiTests), see the reference branch:
+-/// - JsonStringEnumConverter (statuses travel as strings, unknown text -> 400) and ApiBehaviorOptions.InvalidModelStateResponseFactory
+-///   returning application/problem+json (ValidationProblemDetails);
+-/// - AddProblemDetails + UseExceptionHandler that answers 500 application/problem+json WITHOUT any exception text;
+-/// - validators registered as IValidator&lt;T&gt; (CreateTaskDto, UpdateTaskDto, UpdateStatusDto, TaskQuery) + ValidationFilter registered;
+-/// - TimeProvider.System singleton; /health (AddHealthChecks + MapHealthChecks);
+-/// - only ONE OpenAPI generator: remove AddOpenApi/MapOpenApi, keep Swashbuckle.
+-/// </summary>
+ public partial class Program
+ {
+     public static void Main(string[] args)
+     {
+         var builder = WebApplication.CreateBuilder(args);
+ 
+-        builder.Services.AddControllers();
++        builder.Services
++            .AddControllers()
++            .AddJsonOptions(o => o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+         builder.Services.AddEndpointsApiExplorer();
+         builder.Services.AddSwaggerGen();
+-        // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+-        builder.Services.AddOpenApi();
++        builder.Services.AddProblemDetails();
++        builder.Services.AddHealthChecks();
++
++        builder.Services.AddSingleton(TimeProvider.System);
+         builder.Services.AddSingleton<ITaskRepository, InMemoryTaskRepository>();
+ 
+-        builder.Services.AddScoped<CreateTaskDtoValidator>();
+-        builder.Services.AddScoped<UpdateStatusDtoValidator>();
++        builder.Services.AddScoped<IValidator<CreateTaskDto>, CreateTaskDtoValidator>();
++        builder.Services.AddScoped<IValidator<UpdateTaskDto>, UpdateTaskDtoValidator>();
++        builder.Services.AddScoped<IValidator<UpdateStatusDto>, UpdateStatusDtoValidator>();
++        builder.Services.AddScoped<IValidator<TaskQuery>, TaskQueryValidator>();
++        builder.Services.AddScoped<ValidationFilter>();
++
++        // Model binding errors (bad JSON, unknown enum text) must look like validation errors too.
++        builder.Services.Configure<ApiBehaviorOptions>(o => o.InvalidModelStateResponseFactory = ctx =>
++            new ObjectResult(new ValidationProblemDetails(ctx.ModelState) { Status = StatusCodes.Status400BadRequest })
++            {
++                StatusCode = StatusCodes.Status400BadRequest,
++                ContentTypes = { "application/problem+json" },
++            });
++
+         var app = builder.Build();
+ 
++        app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
++        {
++            // Never show the exception to the client; it is already logged by the framework.
++            var problem = new ProblemDetails { Status = StatusCodes.Status500InternalServerError, Title = "An unexpected error occurred." };
++            context.Response.StatusCode = problem.Status.Value;
++            context.Response.ContentType = "application/problem+json";
++            await context.Response.WriteAsJsonAsync(problem, (System.Text.Json.JsonSerializerOptions?)null, "application/problem+json");
++        }));
++
+         if (app.Environment.IsDevelopment())
+         {
+-            app.MapOpenApi();
+             app.UseSwagger();
+             app.UseSwaggerUI();
+         }
+ 
+         app.UseHttpsRedirection();
+         app.UseAuthorization();
++        app.MapHealthChecks("/health");
+         app.MapControllers();
+         app.Run();
+     }
+ }
++
++public partial class Program
++{
++}
+diff --git a/TaskManagementService/Repositories/InMemoryTaskRepository.cs b/TaskManagementService/Repositories/InMemoryTaskRepository.cs
+index f643eed..c66e8b6 100644
+--- a/TaskManagementService/Repositories/InMemoryTaskRepository.cs
++++ b/TaskManagementService/Repositories/InMemoryTaskRepository.cs
+@@ -1,71 +1,151 @@
++using System.Collections.Concurrent;
++using TaskManagementService.Domain;
++
+ namespace TaskManagementService.Repositories;
+ 
+ /// <summary>
+-/// TODO (spec): this is still the ORIGINAL implementation (plain List and "_nextId++", not thread-safe, hands out the stored objects).
+-/// Target behaviour — see InMemoryTaskRepository in the reference branch and TaskRepositoryExtendedTests:
+-/// ConcurrentDictionary + Interlocked ids + a lock per task, copies in and out, CreatedAt/UpdatedAt from the TimeProvider,
+-/// history of transitions, QueryAsync (filter, search, paging), UpdateAsync, DeleteAsync, GetHistoryAsync,
+-/// transition rules from TaskStatusRules (the private IsValidTransition below goes away).
++/// Thread-safe in-memory store. Ids come from an atomic counter; every task has its own lock for read-modify-write;
++/// callers only ever get copies, so changing a returned object never changes the store.
+ /// </summary>
+ public class InMemoryTaskRepository : ITaskRepository
+ {
+-    private readonly List<Models.Task> _tasks = new();
+-    private int _nextId = 1;
++    private readonly ConcurrentDictionary<int, Entry> tasks = new();
++    private readonly TimeProvider time;
++    private int lastId;
+ 
+     public InMemoryTaskRepository(TimeProvider? time = null)
+     {
++        this.time = time ?? TimeProvider.System;
+     }
+ 
+-    public async Task<Models.Task> CreateAsync(Models.Task task)
++    public Task<Models.Task> CreateAsync(Models.Task task)
+     {
+-        task.Id = _nextId++;
+-        _tasks.Add(task);
+-        return await System.Threading.Tasks.Task.FromResult(task);
++        ArgumentNullException.ThrowIfNull(task);
++        var now = this.time.GetUtcNow();
++        var entry = new Entry(new Models.Task
++        {
++            Id = Interlocked.Increment(ref this.lastId),
++            Title = task.Title,
++            Description = task.Description,
++            Status = Models.TaskStatus.Backlog,
++            CreatedAt = now,
++            UpdatedAt = now,
++        });
++        _ = this.tasks.TryAdd(entry.Task.Id, entry);
++        return System.Threading.Tasks.Task.FromResult(Copy(entry.Task));
+     }
+ 
+-    public async Task<IEnumerable<Models.Task>> GetAllAsync()
++    public System.Threading.Tasks.Task<IEnumerable<Models.Task>> GetAllAsync() =>
++        System.Threading.Tasks.Task.FromResult<IEnumerable<Models.Task>>(this.Snapshot().ToList());
++
++    public System.Threading.Tasks.Task<Models.PagedResult<Models.Task>> QueryAsync(Models.TaskQuery query)
+     {
+-        return await System.Threading.Tasks.Task.FromResult(_tasks.AsEnumerable());
++        ArgumentNullException.ThrowIfNull(query);
++        var items = this.Snapshot();
++        if (query.Status is { } status)
++        {
++            items = items.Where(t => t.Status == status);
++        }
++
++        if (!string.IsNullOrWhiteSpace(query.Search))
++        {
++            var text = query.Search.Trim();
++            items = items.Where(t => t.Title.Contains(text, StringComparison.OrdinalIgnoreCase) || t.Description.Contains(text, StringComparison.OrdinalIgnoreCase));
++        }
++
++        var all = items.ToList();
++        var page = Math.Max(1, query.Page);
++        var size = Math.Clamp(query.PageSize, 1, Models.TaskQuery.MaxPageSize);
++        var pageItems = all.Skip((page - 1) * size).Take(size).ToList();
++        return System.Threading.Tasks.Task.FromResult(new Models.PagedResult<Models.Task>(pageItems, page, size, all.Count));
+     }
+ 
+-    public async Task<Models.Task?> GetByIdAsync(int id)
++    public System.Threading.Tasks.Task<Models.Task?> GetByIdAsync(int id)
+     {
+-        return await System.Threading.Tasks.Task.FromResult(_tasks.FirstOrDefault(t => t.Id == id));
++        if (!this.tasks.TryGetValue(id, out var entry))
++        {
++            return System.Threading.Tasks.Task.FromResult<Models.Task?>(null);
++        }
++
++        lock (entry.Gate)
++        {
++            return System.Threading.Tasks.Task.FromResult<Models.Task?>(Copy(entry.Task));
++        }
+     }
+ 
+-    public async Task UpdateStatusAsync(int id, Models.TaskStatus newStatus)
++    public System.Threading.Tasks.Task<Models.Task> UpdateAsync(int id, string title, string description)
+     {
+-        var task = _tasks.FirstOrDefault(t => t.Id == id);
+-        if (task == null)
++        var entry = this.Find(id);
++        lock (entry.Gate)
+         {
+-            throw new KeyNotFoundException($"Task with ID {id} not found.");
++            entry.Task.Title = title;
++            entry.Task.Description = description;
++            entry.Task.UpdatedAt = this.time.GetUtcNow();
++            return System.Threading.Tasks.Task.FromResult(Copy(entry.Task));
+         }
++    }
+ 
+-        if (!IsValidTransition(task.Status, newStatus))
++    public System.Threading.Tasks.Task UpdateStatusAsync(int id, Models.TaskStatus newStatus)
++    {
++        var entry = this.Find(id);
++        lock (entry.Gate)
+         {
+-            throw new InvalidOperationException($"Invalid status transition from {task.Status} to {newStatus}.");
++            var current = entry.Task.Status;
++            if (!TaskStatusRules.CanTransition(current, newStatus))
++            {
++                throw new InvalidOperationException(TaskStatusRules.DescribeRefusal(current, newStatus));
++            }
++
++            var now = this.time.GetUtcNow();
++            entry.Task.Status = newStatus;
++            entry.Task.UpdatedAt = now;
++            entry.History.Add(new Models.TaskHistoryEntry(current, newStatus, now));
+         }
+ 
+-        task.Status = newStatus;
+-        await System.Threading.Tasks.Task.CompletedTask;
++        return System.Threading.Tasks.Task.CompletedTask;
+     }
+ 
+-    public Task<Models.PagedResult<Models.Task>> QueryAsync(Models.TaskQuery query) => throw new NotImplementedException("TODO");
++    public System.Threading.Tasks.Task<bool> DeleteAsync(int id) => System.Threading.Tasks.Task.FromResult(this.tasks.TryRemove(id, out _));
++
++    public System.Threading.Tasks.Task<IReadOnlyList<Models.TaskHistoryEntry>> GetHistoryAsync(int id)
++    {
++        var entry = this.Find(id);
++        lock (entry.Gate)
++        {
++            return System.Threading.Tasks.Task.FromResult<IReadOnlyList<Models.TaskHistoryEntry>>(entry.History.ToList());
++        }
++    }
+ 
+-    public Task<Models.Task> UpdateAsync(int id, string title, string description) => throw new NotImplementedException("TODO");
++    private static Models.Task Copy(Models.Task t) => new()
++    {
++        Id = t.Id,
++        Title = t.Title,
++        Description = t.Description,
++        Status = t.Status,
++        CreatedAt = t.CreatedAt,
++        UpdatedAt = t.UpdatedAt,
++    };
+ 
+-    public Task<bool> DeleteAsync(int id) => throw new NotImplementedException("TODO");
++    private Entry Find(int id) =>
++        this.tasks.TryGetValue(id, out var entry) ? entry : throw new KeyNotFoundException($"Task with ID {id} not found.");
+ 
+-    public Task<IReadOnlyList<Models.TaskHistoryEntry>> GetHistoryAsync(int id) => throw new NotImplementedException("TODO");
++    private IEnumerable<Models.Task> Snapshot() =>
++        this.tasks.Values.OrderBy(e => e.Task.Id).Select(e =>
++        {
++            lock (e.Gate)
++            {
++                return Copy(e.Task);
++            }
++        });
+ 
+-    private bool IsValidTransition(Models.TaskStatus current, Models.TaskStatus next)
++    private sealed class Entry
+     {
+-        return (current, next) switch
+-        {
+-            (Models.TaskStatus.Backlog, Models.TaskStatus.InWork) => true,
+-            (Models.TaskStatus.InWork, Models.TaskStatus.Testing) => true,
+-            (Models.TaskStatus.Testing, Models.TaskStatus.Done) => true,
+-            _ => false
+-        };
++        public Entry(Models.Task task) => this.Task = task;
++
++        public Models.Task Task { get; }
++
++        public List<Models.TaskHistoryEntry> History { get; } = new();
++
++        public object Gate { get; } = new();
+     }
+ }
+diff --git a/TaskManagementService/TaskManagementService.csproj b/TaskManagementService/TaskManagementService.csproj
+index 175f2c3..e3e4f17 100644
+--- a/TaskManagementService/TaskManagementService.csproj
++++ b/TaskManagementService/TaskManagementService.csproj
+@@ -9,7 +9,6 @@
+   <ItemGroup>
+     <PackageReference Include="FluentValidation" Version="12.0.0" />
+     
+-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.10" />
+     <PackageReference Include="Swashbuckle.AspNetCore" Version="9.0.6" />
+     <PackageReference Include="Swashbuckle.AspNetCore.Swagger" Version="9.0.6" />
+     <PackageReference Include="Swashbuckle.AspNetCore.SwaggerGen" Version="9.0.6" />
+diff --git a/TaskManagementService/Validators/TaskQueryValidator.cs b/TaskManagementService/Validators/TaskQueryValidator.cs
+index c8296a7..c75b3a7 100644
+--- a/TaskManagementService/Validators/TaskQueryValidator.cs
++++ b/TaskManagementService/Validators/TaskQueryValidator.cs
+@@ -3,10 +3,14 @@ using TaskManagementService.Models;
+ 
+ namespace TaskManagementService.Validators;
+ 
+-/// <summary>
+-/// TODO (spec): Page at least 1 ("Page must be at least 1."), PageSize 1..TaskQuery.MaxPageSize ("PageSize must be between 1 and 100."),
+-/// Search at most 100 characters, Status (when given) a defined enum value ("Invalid status value.").
+-/// </summary>
++/// <summary>Page at least 1, page size 1..100, search text at most 100 characters, status a defined value.</summary>
+ public class TaskQueryValidator : AbstractValidator<TaskQuery>
+ {
++    public TaskQueryValidator()
++    {
++        RuleFor(x => x.Page).GreaterThanOrEqualTo(1).WithMessage("Page must be at least 1.");
++        RuleFor(x => x.PageSize).InclusiveBetween(1, TaskQuery.MaxPageSize).WithMessage("PageSize must be between 1 and 100.");
++        RuleFor(x => x.Search).MaximumLength(100).WithMessage("Search cannot exceed 100 characters.");
++        RuleFor(x => x.Status).IsInEnum().When(x => x.Status.HasValue).WithMessage("Invalid status value.");
++    }
+ }
+diff --git a/TaskManagementService/Validators/UpdateStatusDtoValidator.cs b/TaskManagementService/Validators/UpdateStatusDtoValidator.cs
+index 7315f42..d4776de 100644
+--- a/TaskManagementService/Validators/UpdateStatusDtoValidator.cs
++++ b/TaskManagementService/Validators/UpdateStatusDtoValidator.cs
+@@ -3,12 +3,12 @@ using TaskManagementService.DTOs;
+ 
+ namespace TaskManagementService.Validators;
+ 
+-/// <summary>TODO (spec): Status is required ("Status is required.") and must be a defined value ("Invalid status value."). Status is nullable on purpose.</summary>
+ public class UpdateStatusDtoValidator : AbstractValidator<UpdateStatusDto>
+ {
+     public UpdateStatusDtoValidator()
+     {
+         RuleFor(x => x.Status)
+-            .IsInEnum().WithMessage("Invalid status value.");
++            .NotNull().WithMessage("Status is required.")
++            .Must(s => s is null || Enum.IsDefined(s.Value)).WithMessage("Invalid status value.");
+     }
+ }
+diff --git a/TaskManagementService/Validators/UpdateTaskDtoValidator.cs b/TaskManagementService/Validators/UpdateTaskDtoValidator.cs
+index 63cd7fc..9326709 100644
+--- a/TaskManagementService/Validators/UpdateTaskDtoValidator.cs
++++ b/TaskManagementService/Validators/UpdateTaskDtoValidator.cs
+@@ -3,10 +3,16 @@ using TaskManagementService.DTOs;
+ 
+ namespace TaskManagementService.Validators;
+ 
+-/// <summary>
+-/// TODO (spec): same rules and messages as CreateTaskDtoValidator: Title required (whitespace only counts as empty, "Title is required."),
+-/// at most 100 characters ("Title cannot exceed 100 characters."), Description at most 1000 ("Description cannot exceed 1000 characters.").
+-/// </summary>
++/// <summary>Same rules as for creating a task: the title is required (whitespace only counts as empty) and at most 100 characters, the description at most 1000.</summary>
+ public class UpdateTaskDtoValidator : AbstractValidator<UpdateTaskDto>
+ {
++    public UpdateTaskDtoValidator()
++    {
++        RuleFor(x => x.Title)
++            .NotEmpty().WithMessage("Title is required.")
++            .MaximumLength(100).WithMessage("Title cannot exceed 100 characters.");
++
++        RuleFor(x => x.Description)
++            .MaximumLength(1000).WithMessage("Description cannot exceed 1000 characters.");
++    }
+ }
